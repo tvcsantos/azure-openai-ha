@@ -55,7 +55,7 @@ This is equivalent to the built-in [OpenAI Conversation integration](https://www
 4. Download and install the integration from HACS: [Azure OpenAI Conversation](https://my.home-assistant.io/redirect/hacs_repository/?owner=joselcaguilar&repository=azure-openai-ha&category=integration).
 5. Restart your Home Assistant instance.
 6. [Click here](https://my.home-assistant.io/redirect/config_flow_start/?domain=azure_openai_conversation) or go to **Settings → Devices & Services → Add Integration → Azure OpenAI Conversation**.
-7. Enter your `API Key` and `API Base URL` (use the format `https://your-resource.services.ai.azure.com/`) and hit **Submit**.
+7. Enter your `API Key` and `API Base URL` (use the format `https://your-resource.services.ai.azure.com/`), pick the `API Route`, and hit **Submit**. Leave `API Version` empty to use the default for the chosen route. See [API route and version](#api-route-and-version) below.
 8. Configure your assistant to use the Azure OpenAI Conversation.
 
 #  Options
@@ -79,9 +79,22 @@ The maximum number of words or "tokens" that the AI model should generate in its
 
 - **Top P:** An alternative to temperature, top_p determines the proportion of the most likely word choices the model should consider when generating text. A higher top_p means the model will only consider the most likely words, while a lower top_p means a wider range of words, including less likely ones, will be considered. For more information, see the [Azure OpenAI Completion Documentation](https://learn.microsoft.com/azure/cognitive-services/openai/how-to/completions).
 
-## API Version change
+## API route and version
 
-This value couldn't be changed through options, to update it you must need to delete and recreate the integration. Make sure that you have all required values like API key saved before recreation.
+Azure exposes two API surfaces, selectable with the `API Route` field when you add the integration:
+
+| API Route | Endpoint | Version format | Default |
+| --------- | -------- | -------------- | ------- |
+| **v1 API** (default) | `.../openai/v1/` | Rolling: `preview`, `latest` | `preview` |
+| **Deployments** | `.../openai/deployments/` | Dated: `2025-04-01-preview` | `2025-04-01-preview` |
+
+Use the **v1 API** unless your resource only supports the older deployments route. The two version formats are not interchangeable - a dated version will not work on the v1 route, and vice versa.
+
+The `API Version` field can be left empty to use the default shown above for the selected route. Set it only if you need to pin a specific version.
+
+Whichever route you choose, the API Base URL must be the root URL of your Azure service (`https://your-resource.services.ai.azure.com/`) with no `/openai` path of its own - the route's path is appended to it as-is. On the deployments route the deployment name is taken from the **Model** option, and `/deployments/{model}/` is inserted for the endpoints that require it.
+
+These values can't be changed through options, to update them you must delete and recreate the integration. Make sure that you have all required values like API key saved before recreation. Existing setups keep using the v1 route with `preview`.
 
 # Changelog
 

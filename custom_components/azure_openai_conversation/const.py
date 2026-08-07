@@ -6,6 +6,8 @@ DOMAIN = "azure_openai_conversation"
 LOGGER: logging.Logger = logging.getLogger(__package__)
 
 CONF_API_BASE = "api_base"
+CONF_API_ROUTE = "api_route"
+CONF_API_VERSION = "api_version"
 CONF_CHAT_MODEL = "chat_model"
 CONF_FILENAMES = "filenames"
 CONF_MAX_TOKENS = "max_tokens"
@@ -22,6 +24,19 @@ CONF_WEB_SEARCH_CITY = "city"
 CONF_WEB_SEARCH_REGION = "region"
 CONF_WEB_SEARCH_COUNTRY = "country"
 CONF_WEB_SEARCH_TIMEZONE = "timezone"
+
+# Azure exposes two API surfaces. The `v1` route (`.../openai/v1/`) takes rolling
+# version identifiers, while the older `deployments` route (`.../openai/deployments/`)
+# takes dated ones and needs at least 2025-03-01-preview for the Responses API.
+API_ROUTE_V1 = "v1"
+API_ROUTE_DEPLOYMENTS = "deployments"
+API_ROUTES: list[str] = [API_ROUTE_V1, API_ROUTE_DEPLOYMENTS]
+DEFAULT_API_ROUTE = API_ROUTE_V1
+DEFAULT_API_VERSIONS: dict[str, str] = {
+    API_ROUTE_V1: "preview",
+    API_ROUTE_DEPLOYMENTS: "2025-04-01-preview",
+}
+
 RECOMMENDED_CHAT_MODEL = "gpt-4o-mini"
 RECOMMENDED_MAX_TOKENS = 150
 RECOMMENDED_REASONING_EFFORT = "low"

@@ -4,10 +4,14 @@
       "user": {
         "data": {
           "api_key": "[%key:common::config_flow::data::api_key%]",
-          "api_base": "[%key:common::config_flow::data::api_base%]"
+          "api_base": "[%key:common::config_flow::data::api_base%]",
+          "api_route": "API Route",
+          "api_version": "API Version"
         },
         "data_description": {
-          "api_base": "Example: {example_url}"
+          "api_base": "The root URL of your Azure service, with no /openai path. Example: {example_url}",
+          "api_route": "The Azure API surface to call. Use the v1 API unless your resource only supports the older deployments route.",
+          "api_version": "Leave empty to use the default for the selected route: {default_api_versions}"
         }
       }
     },
@@ -48,6 +52,12 @@
     }
   },
   "selector": {
+    "api_route": {
+      "options": {
+        "v1": "v1 API (/openai/v1)",
+        "deployments": "Deployments (/openai/deployments)"
+      }
+    },
     "reasoning_effort": {
       "options": {
         "low": "[%key:common::state::low%]",

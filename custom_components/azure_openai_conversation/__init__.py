@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 from mimetypes import guess_file_type
 from pathlib import Path
+from typing import Any
 
 import openai
 from openai.types.images_response import ImagesResponse
@@ -37,7 +39,10 @@ from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
+    API_ROUTE_DEPLOYMENTS,
     CONF_API_BASE,
+    CONF_API_ROUTE,
+    CONF_API_VERSION,
     CONF_CHAT_MODEL,
     CONF_FILENAMES,
     CONF_MAX_TOKENS,
@@ -45,6 +50,8 @@ from .const import (
     CONF_REASONING_EFFORT,
     CONF_TEMPERATURE,
     CONF_TOP_P,
+    DEFAULT_API_ROUTE,
+    DEFAULT_API_VERSIONS,
     DOMAIN,
     LOGGER,
     RECOMMENDED_CHAT_MODEL,
@@ -245,12 +252,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: OpenAIConfigEntry) -> bool:
     """Set up Azure OpenAI Conversation from a config entry."""
 
-    client = openai.AsyncOpenAI(
-        base_url=normalize_azure_endpoint(entry.data[CONF_API_BASE]),
-        default_query={"api-version": "preview"},
-        api_key=entry.data[CONF_API_KEY],
-        http_client=get_async_client(hass),
-    )
+    client = create_client(hass, entry.data)
 
     # Cache current platform data which gets added to each request (caching done by library)
     _ = await hass.async_add_executor_job(client.platform_headers)
@@ -275,15 +277,34 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-def normalize_azure_endpoint(uri: str) -> str:
-    """Normalize Azure OpenAI endpoint URI by ensuring it ends with /openai/v1/."""
 
-    normalized = uri.rstrip('/')
+def create_client(hass: HomeAssistant, data: Mapping[str, Any]) -> openai.AsyncOpenAI:
+    """Create an Azure OpenAI client from config entry data.
 
-    if not normalized.endswith('/openai/v1'):
-        normalized += '/openai/v1'
+    The configured base URL is taken as the root of the Azure service, with only
+    the route's own path appended to it. Entries created before the API route was
+    configurable have neither key set, so they fall back to the `v1` route.
+    """
 
-    if not normalized.endswith('/'):
-        normalized += '/'
+    api_route = data.get(CONF_API_ROUTE) or DEFAULT_API_ROUTE
+    api_version = data.get(CONF_API_VERSION) or DEFAULT_API_VERSIONS.get(
+        api_route, DEFAULT_API_VERSIONS[DEFAULT_API_ROUTE]
+    )
+    api_base = data[CONF_API_BASE].rstrip("/")
 
-    return normalized
+    if api_route == API_ROUTE_DEPLOYMENTS:
+        # The SDK appends `/openai` to the endpoint and inserts
+        # `/deployments/{model}` for the endpoints that require it.
+        return openai.AsyncAzureOpenAI(
+            azure_endpoint=api_base,
+            api_version=api_version,
+            api_key=data[CONF_API_KEY],
+            http_client=get_async_client(hass),
+        )
+
+    return openai.AsyncOpenAI(
+        base_url=f"{api_base}/openai/v1/",
+        default_query={"api-version": api_version},
+        api_key=data[CONF_API_KEY],
+        http_client=get_async_client(hass),
+    )

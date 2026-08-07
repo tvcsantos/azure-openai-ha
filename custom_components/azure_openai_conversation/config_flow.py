@@ -27,7 +27,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
-from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -40,7 +39,10 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.typing import VolDictType
 
 from .const import (
+    API_ROUTES,
     CONF_API_BASE,
+    CONF_API_ROUTE,
+    CONF_API_VERSION,
     CONF_CHAT_MODEL,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
@@ -55,6 +57,8 @@ from .const import (
     CONF_WEB_SEARCH_REGION,
     CONF_WEB_SEARCH_TIMEZONE,
     CONF_WEB_SEARCH_USER_LOCATION,
+    DEFAULT_API_ROUTE,
+    DEFAULT_API_VERSIONS,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_MAX_TOKENS,
@@ -68,7 +72,7 @@ from .const import (
     WEB_SEARCH_MODELS,
 )
 
-from . import normalize_azure_endpoint
+from . import create_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,8 +80,23 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_API_KEY): str,
         vol.Required(CONF_API_BASE): str,
+        vol.Required(CONF_API_ROUTE, default=DEFAULT_API_ROUTE): SelectSelector(
+            SelectSelectorConfig(
+                options=API_ROUTES,
+                translation_key=CONF_API_ROUTE,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+        vol.Optional(CONF_API_VERSION): str,
     }
 )
+
+STEP_USER_PLACEHOLDERS = {
+    "example_url": "https://xyz.services.ai.azure.com",
+    "default_api_versions": ", ".join(
+        f"`{version}` ({route})" for route, version in DEFAULT_API_VERSIONS.items()
+    ),
+}
 
 RECOMMENDED_OPTIONS = {
     CONF_RECOMMENDED: True,
@@ -91,12 +110,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
 
     Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
     """
-    client = openai.AsyncOpenAI(
-        base_url=normalize_azure_endpoint(data[CONF_API_BASE]),
-        default_query={"api-version": "preview"},
-        api_key=data[CONF_API_KEY],
-        http_client=get_async_client(hass),
-    )
+    client = create_client(hass, data)
     await hass.async_add_executor_job(client.with_options(timeout=10.0).models.list)
 
 
@@ -113,9 +127,7 @@ class AzureOpenAIConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id="user",
                 data_schema=STEP_USER_DATA_SCHEMA,
-                description_placeholders={
-                    "example_url": "https://xyz.services.ai.azure.com"
-                },
+                description_placeholders=STEP_USER_PLACEHOLDERS,
             )
 
         errors: dict[str, str] = {}
@@ -137,7 +149,10 @@ class AzureOpenAIConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         return self.async_show_form(
-            step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+            step_id="user",
+            data_schema=STEP_USER_DATA_SCHEMA,
+            description_placeholders=STEP_USER_PLACEHOLDERS,
+            errors=errors,
         )
 
     @staticmethod
@@ -206,14 +221,7 @@ class AzureOpenAIOptionsFlow(OptionsFlow):
         location_data: dict[str, str] = {}
         zone_home = self.hass.states.get(ENTITY_ID_HOME)
         if zone_home is not None:
-            client = openai.AsyncOpenAI(
-                api_key=self.config_entry.data[CONF_API_KEY],
-                base_url=normalize_azure_endpoint(
-                    self.config_entry.data[CONF_API_BASE]
-                ),
-                default_query={"api-version": "preview"},
-                http_client=get_async_client(self.hass),
-            )
+            client = create_client(self.hass, self.config_entry.data)
             location_schema = vol.Schema(
                 {
                     vol.Optional(
