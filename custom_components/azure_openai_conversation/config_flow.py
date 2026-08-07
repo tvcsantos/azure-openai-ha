@@ -39,8 +39,11 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.typing import VolDictType
 
 from .const import (
+    API_MODE_CHAT_COMPLETIONS,
+    API_MODES,
     API_ROUTES,
     CONF_API_BASE,
+    CONF_API_MODE,
     CONF_API_ROUTE,
     CONF_API_VERSION,
     CONF_CHAT_MODEL,
@@ -57,6 +60,7 @@ from .const import (
     CONF_WEB_SEARCH_REGION,
     CONF_WEB_SEARCH_TIMEZONE,
     CONF_WEB_SEARCH_USER_LOCATION,
+    DEFAULT_API_MODE,
     DEFAULT_API_ROUTE,
     DEFAULT_API_VERSIONS,
     DOMAIN,
@@ -84,6 +88,13 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
             SelectSelectorConfig(
                 options=API_ROUTES,
                 translation_key=CONF_API_ROUTE,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+        vol.Required(CONF_API_MODE, default=DEFAULT_API_MODE): SelectSelector(
+            SelectSelectorConfig(
+                options=API_MODES,
+                translation_key=CONF_API_MODE,
                 mode=SelectSelectorMode.DROPDOWN,
             )
         ),
@@ -188,6 +199,12 @@ class AzureOpenAIOptionsFlow(OptionsFlow):
 
                 if user_input.get(CONF_WEB_SEARCH):
                     if (
+                        self.config_entry.data.get(CONF_API_MODE)
+                        == API_MODE_CHAT_COMPLETIONS
+                    ):
+                        # Web search is a Responses-API tool only.
+                        errors[CONF_WEB_SEARCH] = "web_search_not_supported"
+                    elif (
                         user_input.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
                         not in WEB_SEARCH_MODELS
                     ):

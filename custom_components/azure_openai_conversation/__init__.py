@@ -39,8 +39,10 @@ from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
+    API_MODE_CHAT_COMPLETIONS,
     API_ROUTE_DEPLOYMENTS,
     CONF_API_BASE,
+    CONF_API_MODE,
     CONF_API_ROUTE,
     CONF_API_VERSION,
     CONF_CHAT_MODEL,
@@ -50,10 +52,12 @@ from .const import (
     CONF_REASONING_EFFORT,
     CONF_TEMPERATURE,
     CONF_TOP_P,
+    DEFAULT_API_MODE,
     DEFAULT_API_ROUTE,
     DEFAULT_API_VERSIONS,
     DOMAIN,
     LOGGER,
+    REASONING_MODEL_PREFIXES,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_REASONING_EFFORT,
@@ -128,12 +132,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         model: str = entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
         client: openai.AsyncClient = entry.runtime_data
+        api_mode = entry.data.get(CONF_API_MODE) or DEFAULT_API_MODE
+        is_chat_mode = api_mode == API_MODE_CHAT_COMPLETIONS
 
-        content: ResponseInputMessageContentListParam = [
-            ResponseInputTextParam(type="input_text", text=call.data[CONF_PROMPT])
-        ]
+        # Files are read once and rendered into whichever API's shape is needed.
+        attachments: list[tuple[str, str, str]] = []
 
-        def append_files_to_content() -> None:
+        def read_files() -> None:
             for filename in call.data[CONF_FILENAMES]:
                 if not hass.config.is_allowed_path(filename):
                     raise HomeAssistantError(
@@ -144,6 +149,61 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 if not Path(filename).exists():
                     raise HomeAssistantError(f"`{filename}` does not exist")
                 mime_type, base64_file = encode_file(filename)
+                if "image/" not in mime_type and "application/pdf" not in mime_type:
+                    raise HomeAssistantError(
+                        "Only images and PDF are supported by the OpenAI API,"
+                        f"`{filename}` is not an image file or PDF"
+                    )
+                if "application/pdf" in mime_type and is_chat_mode:
+                    raise HomeAssistantError(
+                        f"Cannot send `{filename}`: PDF attachments require the "
+                        "Responses API, but this entry uses Chat Completions"
+                    )
+                attachments.append((filename, mime_type, base64_file))
+
+        if CONF_FILENAMES in call.data:
+            await hass.async_add_executor_job(read_files)
+
+        try:
+            if is_chat_mode:
+                chat_content: list[dict[str, Any]] = [
+                    {"type": "text", "text": call.data[CONF_PROMPT]}
+                ]
+                chat_content.extend(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_file}"},
+                    }
+                    for _, mime_type, base64_file in attachments
+                )
+
+                chat_args: dict[str, Any] = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": chat_content}],
+                    "max_completion_tokens": entry.options.get(
+                        CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
+                    ),
+                    "user": call.context.user_id,
+                }
+                if model.startswith(REASONING_MODEL_PREFIXES):
+                    chat_args["reasoning_effort"] = entry.options.get(
+                        CONF_REASONING_EFFORT, RECOMMENDED_REASONING_EFFORT
+                    )
+                else:
+                    chat_args["top_p"] = entry.options.get(
+                        CONF_TOP_P, RECOMMENDED_TOP_P
+                    )
+                    chat_args["temperature"] = entry.options.get(
+                        CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
+                    )
+
+                completion = await client.chat.completions.create(**chat_args)
+                return {"text": completion.choices[0].message.content or ""}
+
+            content: ResponseInputMessageContentListParam = [
+                ResponseInputTextParam(type="input_text", text=call.data[CONF_PROMPT])
+            ]
+            for filename, mime_type, base64_file in attachments:
                 if "image/" in mime_type:
                     content.append(
                         ResponseInputImageParam(
@@ -152,7 +212,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                             detail="auto",
                         )
                     )
-                elif "application/pdf" in mime_type:
+                else:
                     content.append(
                         ResponseInputFileParam(
                             type="input_file",
@@ -160,40 +220,32 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                             file_data=f"data:{mime_type};base64,{base64_file}",
                         )
                     )
-                else:
-                    raise HomeAssistantError(
-                        "Only images and PDF are supported by the OpenAI API,"
-                        f"`{filename}` is not an image file or PDF"
-                    )
 
-        if CONF_FILENAMES in call.data:
-            await hass.async_add_executor_job(append_files_to_content)
+            messages: ResponseInputParam = [
+                EasyInputMessageParam(type="message", role="user", content=content)
+            ]
 
-        messages: ResponseInputParam = [
-            EasyInputMessageParam(type="message", role="user", content=content)
-        ]
-
-        try:
             model_args = {
                 "model": model,
                 "input": messages,
                 "max_output_tokens": entry.options.get(
                     CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
                 ),
-                "top_p": entry.options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
-                "temperature": entry.options.get(
-                    CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
-                ),
                 "user": call.context.user_id,
                 "store": False,
             }
 
-            if model.startswith("o"):
+            if model.startswith(REASONING_MODEL_PREFIXES):
                 model_args["reasoning"] = {
                     "effort": entry.options.get(
                         CONF_REASONING_EFFORT, RECOMMENDED_REASONING_EFFORT
                     )
                 }
+            else:
+                model_args["top_p"] = entry.options.get(CONF_TOP_P, RECOMMENDED_TOP_P)
+                model_args["temperature"] = entry.options.get(
+                    CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
+                )
 
             response: Response = await client.responses.create(**model_args)
 

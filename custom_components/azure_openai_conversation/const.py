@@ -6,6 +6,7 @@ DOMAIN = "azure_openai_conversation"
 LOGGER: logging.Logger = logging.getLogger(__package__)
 
 CONF_API_BASE = "api_base"
+CONF_API_MODE = "api_mode"
 CONF_API_ROUTE = "api_route"
 CONF_API_VERSION = "api_version"
 CONF_CHAT_MODEL = "chat_model"
@@ -36,6 +37,16 @@ DEFAULT_API_VERSIONS: dict[str, str] = {
     API_ROUTE_V1: "preview",
     API_ROUTE_DEPLOYMENTS: "2025-04-01-preview",
 }
+
+# Which API the conversation agent talks. The Responses API is preferred, but
+# some gateways in front of Azure only expose the older Chat Completions API.
+API_MODE_RESPONSES = "responses"
+API_MODE_CHAT_COMPLETIONS = "chat_completions"
+API_MODES: list[str] = [API_MODE_RESPONSES, API_MODE_CHAT_COMPLETIONS]
+DEFAULT_API_MODE = API_MODE_RESPONSES
+
+# Models that take `reasoning_effort` instead of `temperature`/`top_p`.
+REASONING_MODEL_PREFIXES: tuple[str, ...] = ("o1", "o3", "o4", "gpt-5")
 
 RECOMMENDED_CHAT_MODEL = "gpt-4o-mini"
 RECOMMENDED_MAX_TOKENS = 150

@@ -81,6 +81,8 @@ The maximum number of words or "tokens" that the AI model should generate in its
 
 ## API route and version
 
+### Which URL surface to use
+
 Azure exposes two API surfaces, selectable with the `API Route` field when you add the integration:
 
 | API Route | Endpoint | Version format | Default |
@@ -91,6 +93,24 @@ Azure exposes two API surfaces, selectable with the `API Route` field when you a
 Use the **v1 API** unless your resource only supports the older deployments route. The two version formats are not interchangeable - a dated version will not work on the v1 route, and vice versa.
 
 The `API Version` field can be left empty to use the default shown above for the selected route. Set it only if you need to pin a specific version.
+
+### Which API the agent talks
+
+Separately from the route, the `API` field picks which API the agent calls:
+
+| API | Endpoint | Use it when |
+| --- | -------- | ----------- |
+| **Responses** (default) | `.../responses` | Normal Azure endpoints. Required for web search and PDF attachments. |
+| **Chat Completions** | `.../chat/completions` | Your endpoint or gateway does not expose the Responses API. |
+
+The two settings are independent, so you can run Chat Completions on either route. On the deployments route, Chat Completions resolves to `.../openai/deployments/{model}/chat/completions`.
+
+Chat Completions supports streaming and tool calling, so Assist can still control your house. Two things do not carry over, and are rejected or reported rather than silently ignored:
+
+- **Web search** is a Responses-API tool with no Chat Completions equivalent. Enabling it in options is rejected while this API is selected.
+- **PDF attachments** in the `generate_content` action need Responses; images still work.
+
+If you are behind an API gateway and unsure which paths it exposes, `debug_azure_routes.sh` in the repo root probes every path this integration can call and reports which ones route.
 
 Whichever route you choose, the API Base URL must be the root URL of your Azure service (`https://your-resource.services.ai.azure.com/`) with no `/openai` path of its own - the route's path is appended to it as-is. On the deployments route the deployment name is taken from the **Model** option, and `/deployments/{model}/` is inserted for the endpoints that require it.
 

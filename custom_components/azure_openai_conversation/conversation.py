@@ -7,6 +7,11 @@ from typing import Any, Literal, cast
 
 import openai
 from openai._streaming import AsyncStream
+from openai.types.chat import (
+    ChatCompletionChunk,
+    ChatCompletionMessageParam,
+    ChatCompletionToolParam,
+)
 from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
@@ -44,6 +49,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import OpenAIConfigEntry
 from .const import (
+    API_MODE_CHAT_COMPLETIONS,
+    CONF_API_MODE,
     CONF_CHAT_MODEL,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
@@ -57,8 +64,10 @@ from .const import (
     CONF_WEB_SEARCH_REGION,
     CONF_WEB_SEARCH_TIMEZONE,
     CONF_WEB_SEARCH_USER_LOCATION,
+    DEFAULT_API_MODE,
     DOMAIN,
     LOGGER,
+    REASONING_MODEL_PREFIXES,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_REASONING_EFFORT,
@@ -88,51 +97,57 @@ async def async_setup_entry(
     async_add_entities([agent])
 
 
+def _is_reasoning_model(model: str) -> bool:
+    """Return True if the model takes `reasoning_effort` over temperature/top_p."""
+    return model.startswith(REASONING_MODEL_PREFIXES)
+
+
+def _to_azure_tool_schema(schema: Any) -> dict[str, Any]:
+    """Normalize schema to Azure/OpenAI function-tool requirements.
+
+    Azure rejects top-level oneOf/anyOf/allOf/enum/not and requires
+    an object at the top level.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+
+    normalized = dict(schema)
+
+    # HA tool schemas can be emitted as anyOf(object, null) for optional
+    # argument groups. Azure requires a top-level object.
+    for combiner in ("anyOf", "oneOf", "allOf"):
+        variants = normalized.get(combiner)
+        if isinstance(variants, list):
+            object_variant = next(
+                (
+                    variant
+                    for variant in variants
+                    if isinstance(variant, dict)
+                    and (
+                        variant.get("type") == "object"
+                        or "properties" in variant
+                    )
+                ),
+                None,
+            )
+            if object_variant is not None:
+                normalized = {**normalized, **object_variant}
+            normalized.pop(combiner, None)
+
+    normalized.pop("enum", None)
+    normalized.pop("not", None)
+
+    if normalized.get("type") != "object":
+        normalized["type"] = "object"
+
+    normalized.setdefault("properties", {})
+    return normalized
+
+
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> FunctionToolParam:
-    """Format tool specification."""
-
-    def _to_azure_tool_schema(schema: Any) -> dict[str, Any]:
-        """Normalize schema to Azure/OpenAI function-tool requirements.
-
-        Azure rejects top-level oneOf/anyOf/allOf/enum/not and requires
-        an object at the top level.
-        """
-        if not isinstance(schema, dict):
-            return {"type": "object", "properties": {}}
-
-        normalized = dict(schema)
-
-        # HA tool schemas can be emitted as anyOf(object, null) for optional
-        # argument groups. Azure requires a top-level object.
-        for combiner in ("anyOf", "oneOf", "allOf"):
-            variants = normalized.get(combiner)
-            if isinstance(variants, list):
-                object_variant = next(
-                    (
-                        variant
-                        for variant in variants
-                        if isinstance(variant, dict)
-                        and (
-                            variant.get("type") == "object"
-                            or "properties" in variant
-                        )
-                    ),
-                    None,
-                )
-                if object_variant is not None:
-                    normalized = {**normalized, **object_variant}
-                normalized.pop(combiner, None)
-
-        normalized.pop("enum", None)
-        normalized.pop("not", None)
-
-        if normalized.get("type") != "object":
-            normalized["type"] = "object"
-
-        normalized.setdefault("properties", {})
-        return normalized
+    """Format tool specification for the Responses API."""
 
     return FunctionToolParam(
         type="function",
@@ -143,6 +158,27 @@ def _format_tool(
         description=tool.description,
         strict=False,
     )
+
+
+def _format_tool_chat(
+    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
+) -> ChatCompletionToolParam:
+    """Format tool specification for the Chat Completions API.
+
+    Chat Completions nests the spec under `function`, where the Responses API
+    keeps `name`/`parameters` at the top level.
+    """
+
+    function: dict[str, Any] = {
+        "name": tool.name,
+        "parameters": _to_azure_tool_schema(
+            convert(tool.parameters, custom_serializer=custom_serializer)
+        ),
+    }
+    if tool.description:
+        function["description"] = tool.description
+
+    return cast(ChatCompletionToolParam, {"type": "function", "function": function})
 
 
 def _convert_content_to_param(
@@ -178,6 +214,160 @@ def _convert_content_to_param(
             for tool_call in content.tool_calls
         )
     return messages
+
+
+def _convert_content_to_chat_param(
+    content: conversation.Content,
+) -> list[ChatCompletionMessageParam]:
+    """Convert HA chat content to Chat Completions messages.
+
+    Tool results are their own `tool` role message here, and tool calls ride on
+    the assistant message rather than being standalone items.
+    """
+    if isinstance(content, conversation.ToolResultContent):
+        return [
+            cast(
+                ChatCompletionMessageParam,
+                {
+                    "role": "tool",
+                    "tool_call_id": content.tool_call_id,
+                    "content": json.dumps(content.tool_result, default=_json_default),
+                },
+            )
+        ]
+
+    if isinstance(content, conversation.AssistantContent):
+        message: dict[str, Any] = {"role": "assistant"}
+        if content.content:
+            message["content"] = content.content
+        if content.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.tool_name,
+                        "arguments": json.dumps(tool_call.tool_args),
+                    },
+                }
+                for tool_call in content.tool_calls
+            ]
+        if len(message) == 1:
+            # Nothing but the role; the API rejects an empty assistant turn.
+            return []
+        return [cast(ChatCompletionMessageParam, message)]
+
+    if content.content:
+        return [
+            cast(
+                ChatCompletionMessageParam,
+                {"role": content.role, "content": content.content},
+            )
+        ]
+
+    return []
+
+
+async def _transform_chat_stream(
+    chat_log: conversation.ChatLog,
+    result: AsyncStream[ChatCompletionChunk],
+    messages: list[ChatCompletionMessageParam],
+) -> AsyncGenerator[conversation.AssistantContentDeltaDict]:
+    """Transform a Chat Completions delta stream into HA format.
+
+    Unlike the Responses API, tool calls arrive as fragments keyed by array
+    index with no per-item completion event, so they are accumulated here and
+    emitted once the stream reports it is done with them.
+    """
+    started = False
+    text_parts: list[str] = []
+    # index -> {"id", "name", "arguments"}
+    tool_calls: dict[int, dict[str, str]] = {}
+    finish_reason: str | None = None
+
+    async for chunk in result:
+        LOGGER.debug("Received chunk: %s", chunk)
+
+        if chunk.usage is not None:
+            chat_log.async_trace(
+                {
+                    "stats": {
+                        "input_tokens": chunk.usage.prompt_tokens,
+                        "output_tokens": chunk.usage.completion_tokens,
+                    }
+                }
+            )
+
+        if not chunk.choices:
+            continue
+
+        choice = chunk.choices[0]
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+
+        delta = choice.delta
+        if delta is None:
+            continue
+
+        if not started and (delta.content or delta.tool_calls):
+            started = True
+            yield {"role": "assistant"}
+
+        if delta.content:
+            text_parts.append(delta.content)
+            yield {"content": delta.content}
+
+        for tool_call_delta in delta.tool_calls or []:
+            call = tool_calls.setdefault(
+                tool_call_delta.index, {"id": "", "name": "", "arguments": ""}
+            )
+            if tool_call_delta.id:
+                call["id"] = tool_call_delta.id
+            if tool_call_delta.function is not None:
+                if tool_call_delta.function.name:
+                    call["name"] = tool_call_delta.function.name
+                if tool_call_delta.function.arguments:
+                    call["arguments"] += tool_call_delta.function.arguments
+
+    if finish_reason == "length":
+        raise HomeAssistantError(
+            "Azure OpenAI response incomplete: max output tokens reached"
+        )
+    if finish_reason == "content_filter":
+        raise HomeAssistantError(
+            "Azure OpenAI response incomplete: content filter triggered"
+        )
+
+    # Mirror the assistant turn back into the running message list so the next
+    # tool iteration sends the call alongside its result.
+    assistant_message: dict[str, Any] = {"role": "assistant"}
+    if text_parts:
+        assistant_message["content"] = "".join(text_parts)
+    if tool_calls:
+        assistant_message["tool_calls"] = [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {"name": call["name"], "arguments": call["arguments"]},
+            }
+            for _, call in sorted(tool_calls.items())
+        ]
+    if len(assistant_message) > 1:
+        messages.append(cast(ChatCompletionMessageParam, assistant_message))
+
+    if tool_calls:
+        if not started:
+            yield {"role": "assistant"}
+        yield {
+            "tool_calls": [
+                llm.ToolInput(
+                    id=call["id"],
+                    tool_name=call["name"],
+                    tool_args=json.loads(call["arguments"] or "{}"),
+                )
+                for _, call in sorted(tool_calls.items())
+            ]
+        }
 
 
 async def _transform_stream(
@@ -353,7 +543,88 @@ class AzureOpenAIConversationEntity(
         self,
         chat_log: conversation.ChatLog,
     ) -> None:
-        """Generate an answer for the chat log."""
+        """Generate an answer for the chat log using the configured API."""
+        api_mode = self.entry.data.get(CONF_API_MODE) or DEFAULT_API_MODE
+
+        if api_mode == API_MODE_CHAT_COMPLETIONS:
+            await self._async_handle_chat_completions(chat_log)
+        else:
+            await self._async_handle_responses(chat_log)
+
+    async def _async_handle_chat_completions(
+        self,
+        chat_log: conversation.ChatLog,
+    ) -> None:
+        """Generate an answer using the Chat Completions API."""
+        options = self.entry.options
+
+        tools: list[ChatCompletionToolParam] | None = None
+        if chat_log.llm_api:
+            tools = [
+                _format_tool_chat(tool, chat_log.llm_api.custom_serializer)
+                for tool in chat_log.llm_api.tools
+            ]
+
+        # Web search is a Responses-API tool and has no Chat Completions
+        # equivalent, so it is silently unavailable on this path.
+
+        model = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
+        messages = [
+            m
+            for content in chat_log.content
+            for m in _convert_content_to_chat_param(content)
+        ]
+
+        client = self.entry.runtime_data
+
+        # To prevent infinite loops, we limit the number of iterations
+        for _iteration in range(MAX_TOOL_ITERATIONS):
+            model_args: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": options.get(
+                    CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
+                ),
+                "user": chat_log.conversation_id,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if tools:
+                model_args["tools"] = tools
+
+            if _is_reasoning_model(model):
+                model_args["reasoning_effort"] = options.get(
+                    CONF_REASONING_EFFORT, RECOMMENDED_REASONING_EFFORT
+                )
+            else:
+                model_args["top_p"] = options.get(CONF_TOP_P, RECOMMENDED_TOP_P)
+                model_args["temperature"] = options.get(
+                    CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
+                )
+
+            try:
+                result = await client.chat.completions.create(**model_args)
+            except openai.RateLimitError as err:
+                LOGGER.error("Rate limited by Azure OpenAI: %s", err)
+                raise HomeAssistantError("Rate limited or insufficient funds") from err
+            except openai.OpenAIError as err:
+                LOGGER.error("Error talking to Azure OpenAI: %s", err)
+                raise HomeAssistantError("Error talking to Azure OpenAI") from err
+
+            async for content in chat_log.async_add_delta_content_stream(
+                self.entity_id, _transform_chat_stream(chat_log, result, messages)
+            ):
+                if not isinstance(content, conversation.AssistantContent):
+                    messages.extend(_convert_content_to_chat_param(content))
+
+            if not chat_log.unresponded_tool_results:
+                break
+
+    async def _async_handle_responses(
+        self,
+        chat_log: conversation.ChatLog,
+    ) -> None:
+        """Generate an answer using the Responses API."""
         options = self.entry.options
 
         tools: list[ToolParam] | None = None
@@ -399,21 +670,24 @@ class AzureOpenAIConversationEntity(
                 "max_output_tokens": options.get(
                     CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
                 ),
-                "top_p": options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
-                "temperature": options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
                 "user": chat_log.conversation_id,
                 "stream": True,
             }
             if tools:
                 model_args["tools"] = tools
 
-            if model.startswith("o"):
+            if _is_reasoning_model(model):
                 model_args["reasoning"] = {
                     "effort": options.get(
                         CONF_REASONING_EFFORT, RECOMMENDED_REASONING_EFFORT
                     )
                 }
             else:
+                # Reasoning models reject non-default sampling parameters.
+                model_args["top_p"] = options.get(CONF_TOP_P, RECOMMENDED_TOP_P)
+                model_args["temperature"] = options.get(
+                    CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
+                )
                 model_args["store"] = False
 
             try:
